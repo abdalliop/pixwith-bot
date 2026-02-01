@@ -1,129 +1,90 @@
-import requests, json, time, os, uuid, hashlib, asyncio
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
-)
+import os, time, httpx, asyncio, logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# إعداد السجلات لمراقبة الأخطاء
+# إعداد السجلات لمراقبة العمل
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-raw_admin = os.getenv("ADMIN_ID", "0").strip()
+# جلب المتغيرات من Railway
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-try:
-    ADMIN_ID = int(raw_admin)
-except ValueError:
-    ADMIN_ID = 0
+# اختيار نموذج قوي لتحريك الصور (I2VGen-XL من شركة Alibaba)
+MODEL_URL = "https://api-inference.huggingface.co/models/ali-vilab/i2vgen-xl"
 
-# القائمة الكاملة والمحدثة للنماذج
-AI_MODELS = {
-    "wan_26": {"name": "🎬 WAN 2.6", "id": "3-36"},
-    "wan_22": {"name": "🎬 WAN 2.2", "id": "3-10"},
-    "veo_31": {"name": "🎥 Veo 3.1 (Google)", "id": "3-11"},
-    "sora_2p": {"name": "🌟 Sora 2 Pro", "id": "3-18"},
-    "sora_2": {"name": "🌟 Sora 2", "id": "3-13"},
-    "kling_o1": {"name": "🔥 Kling O1", "id": "3-35"},
-    "kling_26": {"name": "🔥 Kling 2.6", "id": "3-33"},
-    "kling_1": {"name": "🔥 Kling 2.5", "id": "3-1"},
-    "seed_15": {"name": "💎 Seedance 1.5 Pro", "id": "3-38"},
-    "runway": {"name": "🚀 Runway Gen-4", "id": "3-25"},
-    "luma": {"name": "🌈 Luma Ray 2", "id": "3-4"},
-    "hailuo": {"name": "🌊 Hailuo 2.3", "id": "3-17"},
-    "pixverse": {"name": "🔮 Pixverse V5", "id": "3-27"},
-    "pika": {"name": "🦊 Pika 2.2", "id": "3-26"}
-}
-
-class PixWithAI:
-    def __init__(self):
-        self.base_url = "https://api.pixwith.ai/api"
-        self.session_token = hashlib.md5(f"{uuid.uuid4()}{int(time.time()*1000)}".encode()).hexdigest() + "0"
-        self.headers = {
-            'authority': 'api.pixwith.ai',
-            'x-session-token': self.session_token,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-
-    def get_upload_url(self, file_path):
-        try:
-            r = requests.post(f"{self.base_url}/chats/pre_url", headers=self.headers,
-                json={"image_name": os.path.basename(file_path), "content_type": "image/jpeg"}, timeout=15)
-            return r.json()
-        except: return None
-
-    def upload_image(self, data, file_path):
-        try:
-            s3 = data.get("data", {}).get("url", data)
-            url, fields = s3.get("url"), s3.get("fields", {})
-            files = [(k, (None, str(v))) for k, v in fields.items()]
-            with open(file_path, 'rb') as f:
-                files.append(('file', (os.path.basename(file_path), f.read(), 'image/jpeg')))
-            r = requests.post(url, files=files, timeout=30)
-            return fields.get("key") if r.status_code in [200, 204] else None
-        except: return None
-
-    def create_video(self, image_key, prompt, model_id):
-        try:
-            return requests.post(f"{self.base_url}/items/create", headers=self.headers, json={
-                "images": {"image1": image_key},
-                "prompt": prompt,
-                "options": {"prompt_optimization": True, "num_outputs": 1, "aspect_ratio": "16:9",
-                           "resolution": "480p", "duration": 4, "sound": True},
-                "model_id": model_id
-            }, timeout=15).json()
-        except: return None
-
-    def get_history(self):
-        try:
-            return requests.post(f"{self.base_url}/items/history", headers=self.headers,
-                json={"tool_type": "3", "page": 0, "page_size": 5}, timeout=15).json()
-        except: return {}
-
-sessions = {}
+async def generate_video_hf(image_path, prompt):
+    """هذه الدالة ترسل الصورة لـ Hugging Face وتعيد الفيديو"""
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    
+    with open(image_path, "rb") as f:
+        img_data = f.read()
+    
+    async with httpx.AsyncClient() as client:
+        # إرسال الطلب (Hugging Face سيعالج الصورة والبرومبت)
+        response = await client.post(
+            MODEL_URL, 
+            headers=headers, 
+            content=img_data, 
+            timeout=300 # وقت انتظار طويل لأن الفيديو يحتاج معالجة
+        )
+        
+        if response.status_code == 200:
+            video_name = f"video_{int(time.time())}.mp4"
+            with open(video_name, "wb") as v_file:
+                v_file.write(response.content)
+            return video_name
+        else:
+            logging.error(f"خطأ من Hugging Face: {response.status_code}")
+            return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 ابدأ الآن", callback_data="make")]])
-    await update.message.reply_text("مرحباً بك! اختر نموذج الذكاء الاصطناعي لتحريك صورك.", reply_markup=kb)
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    await query.answer()
-
-    if query.data == "make":
-        btns = []
-        keys = list(AI_MODELS.keys())
-        for i in range(0, len(keys), 2):
-            row = [InlineKeyboardButton(AI_MODELS[keys[i]]["name"], callback_data=f"sel_{keys[i]}")]
-            if i+1 < len(keys):
-                row.append(InlineKeyboardButton(AI_MODELS[keys[i+1]]["name"], callback_data=f"sel_{keys[i+1]}"))
-            btns.append(row)
-        await query.message.edit_text("🤖 اختر الموديل:", reply_markup=InlineKeyboardMarkup(btns))
-
-    elif query.data.startswith("sel_"):
-        m_key = query.data.replace("sel_", "")
-        model = AI_MODELS[m_key]
-        sessions[uid] = {"step": "image", "api": PixWithAI(), "model_id": model["id"], "model_name": model["name"]}
-        await query.message.edit_text(f"✅ تم اختيار {model['name']}\n📷 أرسل الصورة الآن...")
+    await update.message.reply_text("✨ أهلاً بك في نظام Hugging Face المتطور!\n\nارسل لي الصورة التي تريد تحويلها لفيديو.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in sessions or sessions[uid]["step"] != "image": return
+    if update.effective_user.id != ADMIN_ID: return
+    
     file = await update.message.photo[-1].get_file()
-    path = f"img_{uid}.jpg"
+    path = f"img_{update.effective_user.id}.jpg"
     await file.download_to_drive(path)
-    sessions[uid].update({"image": path, "step": "prompt"})
-    await update.message.reply_text("✍️ أرسل وصف الفيديو (Prompt) بالإنجليزية:")
+    
+    context.user_data['image_path'] = path
+    await update.message.reply_text("📸 وصلت الصورة.. الآن أرسل وصف التحريك (بالإنجليزي):")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in sessions or sessions[uid]["step"] != "prompt": return
+    if update.effective_user.id != ADMIN_ID or 'image_path' not in context.user_data:
+        return
 
     prompt = update.message.text
-    s = sessions[uid]
-    msg = await update.message.reply_text(f"⏳ جاري التوليد بواسطة {s['model_name']}...")
+    image_path = context.user_data['image_path']
+    
+    msg = await update.message.reply_text("🚀 جاري إرسال الطلب لـ Hugging Face.. انتظر قليلاً.")
+
+    try:
+        video_file = await generate_video_hf(image_path, prompt)
+        
+        if video_file:
+            await update.message.reply_video(video=open(video_file, 'rb'), caption="✅ تم التوليد بواسطة I2VGen-XL")
+            os.remove(video_file)
+        else:
+            await msg.edit_text("❌ فشل التوليد. قد يكون النموذج مشغولاً حالياً، جرب لاحقاً.")
+            
+    except Exception as e:
+        await msg.edit_text(f"⚠️ حدث خطأ: {str(e)}")
+    finally:
+        if os.path.exists(image_path): os.remove(image_path)
+        context.user_data.clear()
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    print("البوت يعمل الآن بنظام Hugging Face...")
+    app.run_polling()
 
     try:
         up = s["api"].get_upload_url(s["image"])
