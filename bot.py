@@ -5,8 +5,8 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-BOT_TOKEN = "PUT_YOUR_TOKEN"
-ALLOWED_USERS = [123456789]  # ايديك فقط
+BOT_TOKEN = "6253935996:AAGZ5k8SsxBt_BXyYe0eC0XOnw1tWRIpINg"
+ALLOWED_USERS = [1361430088]  # ايديك فقط
 
 # ================= API CLASS (بدون تغيير) =================
 class PixWithAI:
