@@ -5,8 +5,11 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-BOT_TOKEN = "6253935996:AAGZ5k8SsxBt_BXyYe0eC0XOnw1tWRIpINg"
-ALLOWED_USERS = [1361430088]  # ايديك فقط
+# --- التعديل هنا: جلب البيانات من إعدادات ريلواي ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+# نحول الأيدي إلى رقم ونضعه في قائمة
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ALLOWED_USERS = [ADMIN_ID]
 
 # ================= API CLASS (بدون تغيير) =================
 class PixWithAI:
@@ -123,6 +126,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api.create_video(key, prompt)
 
     for _ in range(30):
+        # ملحوظة: استخدام time.sleep يعطل البوت في المشاريع الكبيرة، لكنه سيعمل هنا بشكل مبدئي
         time.sleep(10)
         h = api.get_history()
         items = h.get("data", {}).get("items", [])
@@ -130,17 +134,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for r in items[0]["result_urls"]:
                 if not r.get("is_input", True):
                     await update.message.reply_text(f"✅ تم\n{r['hd']}")
+                    # حذف الصورة المؤقتة بعد الانتهاء
+                    if os.path.exists(image): os.remove(image)
                     return
 
-async def run():
+def main(): # تم تعديل اسم الدالة للتشغيل التقليدي
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN not found in environment variables!")
+        return
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
-    run()
-
-
+    main()
