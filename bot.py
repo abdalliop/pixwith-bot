@@ -1,4 +1,4 @@
-import requests, json, time, os, uuid, hashlib
+import requests, json, time, os, uuid, hashlib, asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,14 +9,19 @@ from telegram.ext import (
 # إعداد السجلات لمراقبة العمليات
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# جلب البيانات من إعدادات ريلواي
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-# قراءة معرف المسؤول بشكل آمن لتجنب التحطم
-raw_admin_id = os.getenv("ADMIN_ID", "0")
-ADMIN_ID = int(raw_admin_id) if raw_admin_id.isdigit() else 0
+# --- جلب البيانات مع تنظيفها من الفراغات ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+raw_admin = os.getenv("ADMIN_ID", "0").strip()
+
+# تحويل آمن للأيدي
+try:
+    ADMIN_ID = int(raw_admin)
+except ValueError:
+    ADMIN_ID = 0
+
 ALLOWED_USERS = [ADMIN_ID]
 
-# ================= API CLASS (بدون تغيير) =================
+# ================= API CLASS =================
 class PixWithAI:
     def __init__(self):
         self.base_url = "https://api.pixwith.ai/api"
@@ -29,10 +34,6 @@ class PixWithAI:
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K)',
             'x-session-token': self.session_token
         }
-
-    def _opts(self, url):
-        try: requests.options(url, headers={'origin':'https://pixwith.ai','referer':'https://pixwith.ai/'})
-        except: pass
 
     def get_upload_url(self, file_path):
         r = requests.post(f"{self.base_url}/chats/pre_url", headers=self.headers,
@@ -64,100 +65,76 @@ class PixWithAI:
 # ================= BOT FUNCTIONS =================
 sessions = {}
 
-def is_allowed(uid): 
-    return uid in ALLOWED_USERS
-
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 إنشاء فيديو", callback_data="make")],
-        [InlineKeyboardButton("♻️ إعادة تعيين", callback_data="reset")],
-        [InlineKeyboardButton("ℹ️ مساعدة", callback_data="help")]
-    ])
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_allowed(uid):
-        await update.message.reply_text("🚫 هذا البوت خاص")
+    if uid != ADMIN_ID:
+        await update.message.reply_text("🚫 هذا البوت خاص بالمطور فقط")
         return
-    await update.message.reply_text("👋 أهلاً بك\nاختر من الأزرار 👇", reply_markup=main_menu())
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 إنشاء فيديو", callback_data="make")],
+        [InlineKeyboardButton("ℹ️ مساعدة", callback_data="help")]
+    ])
+    await update.message.reply_text("👋 أهلاً بك في بوت PixWith\nاختر من الأسفل 👇", reply_markup=keyboard)
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid = query.from_user.id
     await query.answer()
-
-    if not is_allowed(uid):
-        await query.message.reply_text("🚫 غير مصرح")
-        return
-
     if query.data == "make":
-        sessions[uid] = {"step": "image", "api": PixWithAI()}
-        await query.message.reply_text("📷 أرسل الصورة")
-
-    elif query.data == "reset":
-        sessions.pop(uid, None)
-        await query.message.reply_text("♻️ تم إعادة التعيين", reply_markup=main_menu())
-
-    elif query.data == "help":
-        await query.message.reply_text("1️⃣ اضغط إنشاء فيديو\n2️⃣ أرسل صورة\n3️⃣ أرسل البرومبت")
+        sessions[query.from_user.id] = {"step": "image", "api": PixWithAI()}
+        await query.message.reply_text("📷 أرسل الصورة الآن")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in sessions: return
-
+    
     photo = update.message.photo[-1]
     file = await photo.get_file()
     path = f"{uid}.jpg"
     await file.download_to_drive(path)
-
-    sessions[uid]["image"] = path
-    sessions[uid]["step"] = "prompt"
-    await update.message.reply_text("✍️ أرسل البرومنت")
+    
+    sessions[uid].update({"image": path, "step": "prompt"})
+    await update.message.reply_text("✍️ الآن أرسل الوصف (Prompt) للفيديو")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in sessions or sessions[uid].get("step") != "prompt":
-        return
+    if uid not in sessions or sessions[uid].get("step") != "prompt": return
 
-    api = sessions[uid]["api"]
-    image = sessions[uid]["image"]
     prompt = update.message.text
+    api, image = sessions[uid]["api"], sessions[uid]["image"]
+    
+    msg = await update.message.reply_text("⬆️ جاري المعالجة... قد يستغرق الأمر دقيقة")
+    
+    try:
+        up = api.get_upload_url(image)
+        key = api.upload_image(up, image)
+        api.create_video(key, prompt)
 
-    await update.message.reply_text("⬆️ جاري الرفع...")
-    up = api.get_upload_url(image)
-    key = api.upload_image(up, image)
-
-    await update.message.reply_text("🎬 المعالجة بدأت... انتظر قليلاً")
-    api.create_video(key, prompt)
-
-    # محاولة جلب الفيديو (بدون time.sleep لتجنب تعليق البوت)
-    for _ in range(10): 
-        await asyncio.sleep(15) # انتظر 15 ثانية بين كل محاولة
-        h = api.get_history()
-        items = h.get("data", {}).get("items", [])
-        if items and items[0].get("status") == 2:
-            for r in items[0]["result_urls"]:
-                if not r.get("is_input", True):
-                    await update.message.reply_text(f"✅ تم بنجاح:\n{r['hd']}")
-                    if os.path.exists(image): os.remove(image)
-                    return
-    await update.message.reply_text("⚠️ المعالجة تستغرق وقتاً طويلاً، تفقد القناة لاحقاً")
-
-import asyncio # نحتاجه للـ sleep غير المعطل
+        for _ in range(15):
+            await asyncio.sleep(10)
+            h = api.get_history()
+            items = h.get("data", {}).get("items", [])
+            if items and items[0].get("status") == 2:
+                url = items[0]["result_urls"][0]["hd"]
+                await update.message.reply_video(video=url, caption="✅ تم صنع الفيديو بنجاح!")
+                if os.path.exists(image): os.remove(image)
+                return
+        await msg.edit_text("⚠️ استغرقت المعالجة وقتاً طويلاً.")
+    except Exception as e:
+        await msg.edit_text(f"❌ حدث خطأ: {str(e)}")
 
 def main():
-    if not BOT_TOKEN:
-        print("CRITICAL ERROR: BOT_TOKEN is missing!")
+    if not BOT_TOKEN or BOT_TOKEN == "":
+        logging.error("No BOT_TOKEN found!")
         return
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    print("--- Bot is now Active and Running ---")
+    print("--- البوت يعمل الآن بنجاح ---")
     app.run_polling()
 
 if __name__ == "__main__":
