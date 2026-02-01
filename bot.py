@@ -1,14 +1,19 @@
 import requests, json, time, os, uuid, hashlib
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# --- التعديل هنا: جلب البيانات من إعدادات ريلواي ---
+# إعداد السجلات لمراقبة العمليات
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# جلب البيانات من إعدادات ريلواي
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# نحول الأيدي إلى رقم ونضعه في قائمة
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# قراءة معرف المسؤول بشكل آمن لتجنب التحطم
+raw_admin_id = os.getenv("ADMIN_ID", "0")
+ADMIN_ID = int(raw_admin_id) if raw_admin_id.isdigit() else 0
 ALLOWED_USERS = [ADMIN_ID]
 
 # ================= API CLASS (بدون تغيير) =================
@@ -56,7 +61,7 @@ class PixWithAI:
         return requests.post(f"{self.base_url}/items/history", headers=self.headers,
             json={"tool_type":"3","page":0,"page_size":12}).json()
 
-# ================= BOT =================
+# ================= BOT FUNCTIONS =================
 sessions = {}
 
 def is_allowed(uid): 
@@ -94,7 +99,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("♻️ تم إعادة التعيين", reply_markup=main_menu())
 
     elif query.data == "help":
-        await query.message.reply_text("1️⃣ اضغط إنشاء فيديو\n2️⃣ أرسل صورة\n3️⃣ أرسل البرومنت")
+        await query.message.reply_text("1️⃣ اضغط إنشاء فيديو\n2️⃣ أرسل صورة\n3️⃣ أرسل البرومبت")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -111,7 +116,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in sessions or sessions[uid]["step"] != "prompt":
+    if uid not in sessions or sessions[uid].get("step") != "prompt":
         return
 
     api = sessions[uid]["api"]
@@ -122,32 +127,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     up = api.get_upload_url(image)
     key = api.upload_image(up, image)
 
-    await update.message.reply_text("🎬 المعالجة بدأت...")
+    await update.message.reply_text("🎬 المعالجة بدأت... انتظر قليلاً")
     api.create_video(key, prompt)
 
-    for _ in range(30):
-        # ملحوظة: استخدام time.sleep يعطل البوت في المشاريع الكبيرة، لكنه سيعمل هنا بشكل مبدئي
-        time.sleep(10)
+    # محاولة جلب الفيديو (بدون time.sleep لتجنب تعليق البوت)
+    for _ in range(10): 
+        await asyncio.sleep(15) # انتظر 15 ثانية بين كل محاولة
         h = api.get_history()
         items = h.get("data", {}).get("items", [])
         if items and items[0].get("status") == 2:
             for r in items[0]["result_urls"]:
                 if not r.get("is_input", True):
-                    await update.message.reply_text(f"✅ تم\n{r['hd']}")
-                    # حذف الصورة المؤقتة بعد الانتهاء
+                    await update.message.reply_text(f"✅ تم بنجاح:\n{r['hd']}")
                     if os.path.exists(image): os.remove(image)
                     return
+    await update.message.reply_text("⚠️ المعالجة تستغرق وقتاً طويلاً، تفقد القناة لاحقاً")
 
-def main(): # تم تعديل اسم الدالة للتشغيل التقليدي
+import asyncio # نحتاجه للـ sleep غير المعطل
+
+def main():
     if not BOT_TOKEN:
-        print("Error: BOT_TOKEN not found in environment variables!")
+        print("CRITICAL ERROR: BOT_TOKEN is missing!")
         return
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    print("Bot is running...")
+    
+    print("--- Bot is now Active and Running ---")
     app.run_polling()
 
 if __name__ == "__main__":
